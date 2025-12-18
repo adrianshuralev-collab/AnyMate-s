@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Прыгающий шарик</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+            overflow: hidden;
+        }
+
+        canvas {
+            border: 1px solid #ccc;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    // === ЦЕНТРАЛЬНОЕ УПРАВЛЕНИЕ ПАРАМЕТРАМИ ===
+    const SimulationParams = {
+        // Окно
+        WIDTH: 1000,
+        HEIGHT: 700,
+        FPS: 60,
+
+        // Цвета
+        WHITE: '#FFFFFF',
+        BLACK: '#000000',
+        RED: '#FF0000',
+        BLUE: '#0000FF',
+
+        // Шарик
+        BALL_RADIUS: 20,
+        BALL_START_POS: [null, null],
+        BALL_START_VEL: [1.7, 0.0],
+
+        // Физика
+        GRAVITY: 0.1,
+        BOUNCE_ELASTICITY: 1.001, // Уменьшено для более реалистичного поведения
+        MAX_BALL_SPEED: 30,
+        SUBSTEP_THRESHOLD: 15.0,
+
+        // Фигура
+        INITIAL_SIDES: 3, // Треугольник
+        POLYGON_CENTER: [null, null],
+        POLYGON_RADIUS: 350,
+        EDGE_THICKNESS: 10,
+
+        // Шрифт
+        FONT_SIZE: 24,
+        FONT_NAME: 'Arial'
+    };
+
+    // Инициализация параметров, зависящих от размеров
+    SimulationParams.POLYGON_CENTER[0] = SimulationParams.WIDTH / 2;
+    SimulationParams.POLYGON_CENTER[1] = SimulationParams.HEIGHT / 2;
+    SimulationParams.BALL_START_POS[0] = SimulationParams.WIDTH / 2;
+    SimulationParams.BALL_START_POS[1] = SimulationParams.HEIGHT / 2 - 100;
+
+    const P = SimulationParams;
+
+    // Получаем контекст Canvas
+    const canvas = document.getElementById('gameCanvas');
+    canvas.width = P.WIDTH;
+    canvas.height = P.HEIGHT;
+    const ctx = canvas.getContext('2d');
+
+    // Переменные симуляции
+    let ballPos = [...P.BALL_START_POS];
+    let ballVel = [...P.BALL_START_VEL];
+    let currentSides = P.INITIAL_SIDES;
+    let bounceCount = 0;
+
+    function getPolygonPoints(sides, center, radius) {
+        const [cx, cy] = center;
+        const points = [];
+        for (let i = 0; i < sides; i++) {
+            const angleDeg = 90 + i * (360 / sides);
+            const angleRad = angleDeg * Math.PI / 180;
+            const x = cx + radius * Math.cos(angleRad);
+            const y = cy + radius * Math.sin(angleRad);
+            points.push([x, y]);
+        }
+        return points;
+    }
+
+    function distancePointToLine(px, py, x1, y1, x2, y2) {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const l2 = dx * dx + dy * dy;
+        
+        if (l2 === 0) {
+            // Линия вырождена в точку
+            const dist = Math.hypot(px - x1, py - y1);
+            return { dist, projX: x1, projY: y1 };
+        }
+
+        let t = ((px - x1) * dx + (py - y1) * dy) / l2;
+        t = Math.max(0, Math.min(1, t));
+
+        const projX = x1 + t * dx;
+        const projY = y1 + t * dy;
+        const dist = Math.hypot(px - projX, py - projY);
+
+        return { dist, projX, projY };
+    }
+
+    function reflectVelocity(vel, nx, ny, elasticity = P.BOUNCE_ELASTICITY) {
+        const dot = vel[0] * nx + vel[1] * ny;
+        const rx = vel[0] - 2 * dot * nx;
+        const ry = vel[1] - 2 * dot * ny;
+        return [rx * elasticity, ry * elasticity];
+    }
+
+    function limitSpeed(vel, maxSpeed = P.MAX_BALL_SPEED) {
+        const speed = Math.hypot(vel[0], vel[1]);
+        if (speed > maxSpeed) {
+            const scale = maxSpeed / speed;
+            return [vel[0] * scale, vel[1] * scale];
+        }
+        return vel;
+    }
+
+    function draw() {
+        // Очищаем экран
+        ctx.fillStyle = P.WHITE;
+        ctx.fillRect(0, 0, P.WIDTH, P.HEIGHT);
+
+        // Получаем текущие точки полигона
+        const polygonPoints = getPolygonPoints(currentSides, P.POLYGON_CENTER, P.POLYGON_RADIUS);
+
+        // Рисуем многоугольник
+        if (polygonPoints.length > 2) {
+            ctx.beginPath();
+            ctx.moveTo(polygonPoints[0][0], polygonPoints[0][1]);
+            for (let i = 1; i < polygonPoints.length; i++) {
+                ctx.lineTo(polygonPoints[i][0], polygonPoints[i][1]);
+            }
+            ctx.closePath();
+            ctx.lineWidth = P.EDGE_THICKNESS;
+            ctx.strokeStyle = P.BLACK;
+            ctx.stroke();
+        }
+
+        // Рисуем шарик
+        ctx.beginPath();
+        ctx.arc(ballPos[0], ballPos[1], P.BALL_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = P.RED;
+        ctx.fill();
+
+        // Рисуем счётчик отскоков
+        ctx.font = `${P.FONT_SIZE}px ${P.FONT_NAME}`;
+        ctx.fillStyle = P.BLACK;
+        ctx.fillText(`Отскоков: ${bounceCount}`, 10, P.FONT_SIZE + 10);
+    }
+
+    function update() {
+        const speed = Math.hypot(ballVel[0], ballVel[1]);
+        const substeps = Math.max(1, Math.floor(speed / P.SUBSTEP_THRESHOLD));
+        const dtSub = 1.0 / substeps;
+
+        for (let s = 0; s < substeps; s++) {
+            ballVel[1] += P.GRAVITY * dtSub;
+            ballPos[0] += ballVel[0] * dtSub;
+            ballPos[1] += ballVel[1] * dtSub;
+
+            const polygonPoints = getPolygonPoints(currentSides, P.POLYGON_CENTER, P.POLYGON_RADIUS);
+
+            for (let i = 0; i < polygonPoints.length; i++) {
+                const p1 = polygonPoints[i];
+                const p2 = polygonPoints[(i + 1) % polygonPoints.length];
+
+                const { dist, projX, projY } = distancePointToLine(
+                    ballPos[0], ballPos[1], p1[0], p1[1], p2[0], p2[1]
+                );
+
+                if (dist <= P.BALL_RADIUS) {
+                    // Вычисляем вектор ребра
+                    const edgeX = p2[0] - p1[0];
+                    const edgeY = p2[1] - p1[1];
+                    const edgeLength = Math.hypot(edgeX, edgeY);
+                    
+                    if (edgeLength === 0) continue;
+
+                    // Нормализуем вектор ребра
+                    const unitEdgeX = edgeX / edgeLength;
+                    const unitEdgeY = edgeY / edgeLength;
+
+                    // Нормаль к ребру (перпендикуляр, направленная вправо от направления ребра)
+                    let normalX = -unitEdgeY;
+                    let normalY = unitEdgeX;
+
+                    // Определяем, направлена ли нормаль наружу
+                    const midX = (p1[0] + p2[0]) / 2;
+                    const midY = (p1[1] + p2[1]) / 2;
+                    const toCenterX = P.POLYGON_CENTER[0] - midX;
+                    const toCenterY = P.POLYGON_CENTER[1] - midY;
+
+                    // Скалярное произведение нормали и вектора к центру
+                    // Если положительно - нормаль направлена наружу
+                    // Если отрицательно - внутри
+                    const dotProduct = normalX * toCenterX + normalY * toCenterY;
+                    
+                    if (dotProduct > 0) {
+                        // Нормаль уже направлена наружу
+                    } else {
+                        // Инвертируем нормаль, чтобы она была направлена наружу
+                        normalX = -normalX;
+                        normalY = -normalY;
+                    }
+
+                    // Корректируем позицию шарика, чтобы он не застревал внутри
+                    const penetration = P.BALL_RADIUS - dist + 0.1;
+                    ballPos[0] += normalX * penetration;
+                    ballPos[1] += normalY * penetration;
+
+                    // Отражаем скорость
+                    ballVel = reflectVelocity(ballVel, normalX, normalY);
+                    ballVel = limitSpeed(ballVel);
+
+                    // Увеличиваем счётчик отскоков
+                    bounceCount++;
+                    // Увеличиваем количество сторон
+                    currentSides++;
+
+                    break; // Прерываем цикл, чтобы не обрабатывать другие стороны при этом шаге
+                }
+            }
+        }
+    }
+
+    let lastTime = 0;
+    function gameLoop(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const deltaTime = timestamp - lastTime;
+        lastTime = timestamp;
+
+        update();
+        draw();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Запускаем игровой цикл
+    requestAnimationFrame(gameLoop);
+</script>
+
+</body>
+</html>
